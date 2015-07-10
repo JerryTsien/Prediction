@@ -1,0 +1,150 @@
+---
+title: "Activity Prediction"
+author: "Jerry Tsien"
+date: "Wednesday, July 08, 2015"
+output: html_document
+---
+
+##Introduction  
+
+This project is based on the [weight lifting exercises dataset](http://groupware.les.inf.puc-rio.br/har), licensed under the Creative Commons license (CC BY-SA). The goal of the project is to contruct an algorithm that can predict human activities in the dataset accurately, with out-of-sample error < 1%.  
+
+```{r init}
+suppressWarnings(suppressMessages(library(caret)))
+suppressWarnings(suppressMessages(library(randomForest)))
+suppressWarnings(suppressMessages(library(gridExtra)))
+```
+
+##Features  
+
+For the sake of simplicity, the data files have already been downloaded and saved in the R working directory. First, the training data needs to be cleaned. In fact, many unnecessary variables (columns) can be removed without affecting the prediction power. And a potion of the training data is carved out and reserved in this step, to be used for cross validation in later steps.  
+
+```{r feat}
+training <- read.csv("pml-training.csv", na.strings = c("NA", ""))
+# Remove the 100 columns having too many (19216 each) NA values.
+# Invalid values such as #DIV/0! are removed in the same step.
+training <- training[, colSums(is.na(training)) == 0]
+# Remove the first 7 columns which are irrelevant (for now) for prediction. 
+training <- subset(training, select = - c(1:7))
+# Remove the 7 highly-correlated columns.
+col.classe <- which(names(training) %in% "classe")
+high.cor <- findCorrelation(abs(cor(training[, - col.classe])), cutoff = .9)
+training <- training[, - high.cor]  # 46 columns left.
+# Put aside some data for cross validation.
+set.seed(314159)
+in.train <- createDataPartition(training$classe, p = .6, list = FALSE)
+cross.valid <- training[- in.train, ]
+training <- training[in.train, ]
+```
+
+##Algorithm Selection
+
+No linear relationship or simple interpretation can be found *for these variables*, as the plots below have shown. The dependent variable *classe* is categorical, taking only a few values ("A" to "E"), while the other predicting variables are numerical. Therefore the **random forest** algorithm is a suitable choice.  
+
+```{r algosel}
+# Plot the relationship between classe and selected variables.
+p <- list()
+for(i in 1:3) {
+  p[[i]] <- ggplot(training, aes(x = training$classe, y = training[, i])) +
+    geom_jitter(aes(color = training$classe)) +
+    scale_x_discrete("classe") +
+    scale_y_continuous(names(training)[i]) +
+    theme(legend.position = "none")
+}
+do.call("grid.arrange", c(p, ncol = 3))
+```
+
+##Algorithm Execution
+
+On a Windows 7 32-bit platform with Intel Core i5 CPU (2.4GHz), it takes 2 - 3 minutes to build a random forest model, *using all the variables as predictors*.  
+
+```{r algoexec, cache = TRUE}
+model.rf <- randomForest(classe ~ ., data = training)
+in.err <- sum(model.rf$predicted != training$classe) / nrow(training)
+in.err <- sprintf("%1.3f%%", 100 * in.err)
+```
+
+The in-sample (resubstitution) error rate for the model is in.err = `r in.err`. However, since the out-of-sample error is *expected* to be larger than the in-sample error, cross-validation is needed for the evaluation of the algorithm.  
+
+##Evaluation  
+
+To estimate the out-of-sample error, the portion of data reserved for cross validation is used.
+
+```{r eval}
+cv.predict <- predict(model.rf, cross.valid)
+# Matrix unnecessary, since only the error rate is needed.
+#m <- confusionMatrix(cv.predict, cross.valid$classe)
+#out.err <- 1 - m$overall[1]
+out.err <- sum(cv.predict != cross.valid$classe) / nrow(cross.valid)
+out.err <- sprintf("%1.3f%%", 100 * out.err)
+```
+
+The out-of-sample (generalization) error rate of the algorithm is out.err = `r out.err` (< in.err !), which means its prediction power is quite satisfactory.  
+
+##Test Cases  
+
+Finally, this algorithm can be applied to the 20 test cases in the testing data set.
+
+```{r test}
+# Process testing data in the same way as training data.
+testing <- read.csv("pml-testing.csv", na.strings = c("NA", ""))
+col.sel <- which(names(testing) %in% names(training))
+testing <- testing[, col.sel]
+# Predict with the model.
+testing.pred <- predict(model.rf, testing)
+pml_write_files <- function(x, folder = "Submit") {
+  n <- length(x)
+  if (!file.exists(folder)) {
+    dir.create(folder)
+    }
+  for(i in 1:n) {
+    filename <- paste0(folder, "\\problem_id_", i, ".txt")
+    write.table(x[i], file = filename, quote = FALSE,
+                row.names = FALSE, col.names = FALSE)
+  }
+}
+# Save/Display the results for submission.
+pml_write_files(as.character(testing.pred))
+as.character(testing.pred)
+```
+
+##Source
+
+Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013. 
+
+##Appendix
+
+A different approach is to predict *classe* with the following variables:  
+- user_name  
+- raw_timestamp_part_1  
+- raw_timestamp_part_2  
+- cvtd_timestamp  
+Its interpretation is simple: a person can only perform one activity at a given time.  
+
+```{r app}
+train <- read.csv("pml-training.csv")
+train <- train[, c(2:5, 160)]
+set.seed(271828)
+in.cv <- createDataPartition(train$classe, p = .4, list = FALSE)
+cv <- train[in.cv, ]
+train <- train[- in.cv, ]
+m.rf <- randomForest(classe ~ ., data = train)
+cv.p <- predict(m.rf, cv)
+out.err2 <- sum(cv.p != cv$classe) / nrow(cv)
+out.err2 <- sprintf("%1.3f%%", 100 * out.err2)
+test <- read.csv("pml-testing.csv")
+test <- test[, c(2:5)]
+# Impossible to apply the model directly to test.
+test$classe <- "X"
+test <- rbind(cv, test)
+# Make predictions on test and cv combined.
+test$pred <- predict(m.rf, test)
+# Extract only predictions for test.
+test <- test[test$classe == "X", ]
+pml_write_files(as.character(test$pred), "Submit2")
+as.character(test$pred)
+```
+
+In this algorithm the out-of-sample error is out.err2 = `r out.err2`. It's also interesting to note that the two algorithms generate identical predictions for the 20 test cases.  
+
+(The End)
